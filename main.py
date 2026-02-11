@@ -5,10 +5,18 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from yt_dlp import YoutubeDL
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
+DOWNLOAD_DIR = "/tmp/downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 progress_store: dict[str, float] = {}
 file_store: dict[str, str] = {}
@@ -47,8 +55,13 @@ def progress_hook(task_id: str):
 def start_download(task_id: str, req: DownloadRequest):
     try:
         ydl_opts = {
-            "outtmpl": f"{DOWNLOAD_DIR}/%(title)s.%(ext)s",
+            "outtmpl": f"{DOWNLOAD_DIR}/{task_id}_%(title)s.%(ext)s",
+
             "noplaylist": True,
+            "concurrent_fragment_downloads": 1,
+            "retries": 5,
+            "fragment_retries": 5,
+
             "progress_hooks": [progress_hook(task_id)],
 
             # 🔒 Force Android-friendly output
@@ -88,10 +101,6 @@ def start_download(task_id: str, req: DownloadRequest):
             else:
                 final_path = base_path + ".mp3"
 
-            # sanitize filename AFTER yt-dlp
-            directory = os.path.dirname(final_path)
-            filename = safe_filename(os.path.basename(final_path))
-            final_path = os.path.join(directory, filename)
 
             file_store[task_id] = final_path
             progress_store[task_id] = 100.0
@@ -118,11 +127,15 @@ def progress(task_id: str):
 
 
 @app.get("/download-file/{task_id}")
-def download_file(task_id: str):
+def download_file(task_id: str, background_tasks: BackgroundTasks):
     path = file_store.get(task_id)
 
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not available")
+
+    background_tasks.add_task(os.remove, path)
+    file_store.pop(task_id, None)
+    progress_store.pop(task_id, None)
 
     return FileResponse(
         path=path,
